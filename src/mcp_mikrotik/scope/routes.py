@@ -1,7 +1,27 @@
+import re
 from typing import Optional, List
 from ..connector import execute_mikrotik_command
 from mcp.server.mcpserver import Context
 from ..app import mcp, READ, WRITE, WRITE_IDEMPOTENT, DESTRUCTIVE, annotate
+
+# RouterOS internal item id, e.g. *A or *1F.
+_ID_RE = re.compile(r"\*[0-9A-Fa-f]+")
+
+
+async def _resolve_route_id(route_id: str, ctx: Context, device: Optional[str]) -> Optional[str]:
+    """Resolve a positional print number to the internal *hex id; pass *hex IDs through."""
+    route_id = route_id.strip()
+    if route_id.startswith("*"):
+        return route_id
+    if not route_id.isdigit():
+        return None
+    # `[find]` with no where clause returns the routes in the same order plain
+    # `print` numbers them, so index N is the number the list output showed.
+    result = await execute_mikrotik_command(
+        f":put [:pick [/ip route find] {int(route_id)}]", ctx, device=device
+    )
+    resolved = result.strip()
+    return resolved if _ID_RE.fullmatch(resolved) else None
 
 @mcp.tool(name="add_route", annotations=annotate(WRITE, "Add Route"))
 async def mikrotik_add_route(
@@ -129,7 +149,11 @@ async def mikrotik_get_route(ctx: Context, route_id: str, device: Optional[str] 
     """
     await ctx.info(f"Getting route details: route_id={route_id}")
 
-    cmd = f"/ip route print detail where .id={route_id}"
+    resolved = await _resolve_route_id(route_id, ctx, device)
+    if resolved is None:
+        return f"Route with ID '{route_id}' not found."
+
+    cmd = f"/ip route print detail where .id={resolved}"
     result = await execute_mikrotik_command(cmd, ctx, device=device)
 
     if not result or result.strip() == "":
@@ -167,7 +191,11 @@ async def mikrotik_update_route(
     """
     await ctx.info(f"Updating route: route_id={route_id}")
 
-    cmd = f"/ip route set {route_id}"
+    resolved = await _resolve_route_id(route_id, ctx, device)
+    if resolved is None:
+        return f"Route with ID '{route_id}' not found."
+
+    cmd = f"/ip route set {resolved}"
 
     updates = []
     if dst_address:
@@ -211,7 +239,7 @@ async def mikrotik_update_route(
     if "failure:" in result.lower() or "error" in result.lower():
         return f"Failed to update route: {result}"
 
-    details_cmd = f"/ip route print detail where .id={route_id}"
+    details_cmd = f"/ip route print detail where .id={resolved}"
     details = await execute_mikrotik_command(details_cmd, ctx, device=device)
 
     return f"Route updated successfully:\n\n{details}"
@@ -225,13 +253,17 @@ async def mikrotik_remove_route(ctx: Context, route_id: str, device: Optional[st
     """
     await ctx.info(f"Removing route: route_id={route_id}")
 
-    check_cmd = f"/ip route print count-only where .id={route_id}"
+    resolved = await _resolve_route_id(route_id, ctx, device)
+    if resolved is None:
+        return f"Route with ID '{route_id}' not found."
+
+    check_cmd = f"/ip route print count-only where .id={resolved}"
     count = await execute_mikrotik_command(check_cmd, ctx, device=device)
 
     if count.strip() == "0":
         return f"Route with ID '{route_id}' not found."
 
-    cmd = f"/ip route remove {route_id}"
+    cmd = f"/ip route remove {resolved}"
     result = await execute_mikrotik_command(cmd, ctx, device=device)
 
     if "failure:" in result.lower() or "error" in result.lower():

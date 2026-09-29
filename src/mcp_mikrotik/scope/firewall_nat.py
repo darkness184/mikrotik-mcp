@@ -1,7 +1,27 @@
+import re
 from typing import Literal, Optional
 from mcp.server.mcpserver import Context
 from ..connector import execute_mikrotik_command
 from ..app import mcp, READ, WRITE, WRITE_IDEMPOTENT, DESTRUCTIVE, annotate
+
+# RouterOS internal item id, e.g. *A or *1F.
+_ID_RE = re.compile(r"\*[0-9A-Fa-f]+")
+
+
+async def _resolve_nat_rule_id(rule_id: str, ctx: Context, device: Optional[str]) -> Optional[str]:
+    """Resolve a positional print number to the internal *hex rule ID; pass *hex IDs through."""
+    rule_id = rule_id.strip()
+    if rule_id.startswith("*"):
+        return rule_id
+    if not rule_id.isdigit():
+        return None
+    # `[find]` with no where clause returns the rules in the same order plain
+    # `print` numbers them, so index N is the number the list output showed.
+    result = await execute_mikrotik_command(
+        f":put [:pick [/ip firewall nat find] {int(rule_id)}]", ctx, device=device
+    )
+    resolved = result.strip()
+    return resolved if _ID_RE.fullmatch(resolved) else None
 
 @mcp.tool(name="create_nat_rule", annotations=annotate(WRITE, "Create NAT Rule"))
 async def mikrotik_create_nat_rule(
@@ -176,7 +196,11 @@ async def mikrotik_get_nat_rule(ctx: Context, rule_id: str, device: Optional[str
     """
     await ctx.info(f"Getting NAT rule details: rule_id={rule_id}")
 
-    cmd = f"/ip firewall nat print detail where .id={rule_id}"
+    resolved = await _resolve_nat_rule_id(rule_id, ctx, device)
+    if resolved is None:
+        return f"NAT rule with ID '{rule_id}' not found."
+
+    cmd = f"/ip firewall nat print detail where .id={resolved}"
     result = await execute_mikrotik_command(cmd, ctx, device=device)
 
     if not result or result.strip() == "":
@@ -215,8 +239,12 @@ async def mikrotik_update_nat_rule(
     """
     await ctx.info(f"Updating NAT rule: rule_id={rule_id}")
 
+    resolved = await _resolve_nat_rule_id(rule_id, ctx, device)
+    if resolved is None:
+        return f"NAT rule with ID '{rule_id}' not found."
+
     # Build the command
-    cmd = f"/ip firewall nat set {rule_id}"
+    cmd = f"/ip firewall nat set {resolved}"
 
     # Add parameters to update
     updates = []
@@ -290,7 +318,7 @@ async def mikrotik_update_nat_rule(
         return f"Failed to update NAT rule: {result}"
 
     # Get the updated rule details
-    details_cmd = f"/ip firewall nat print detail where .id={rule_id}"
+    details_cmd = f"/ip firewall nat print detail where .id={resolved}"
     details = await execute_mikrotik_command(details_cmd, ctx, device=device)
 
     return f"NAT rule updated successfully:\n\n{details}"
@@ -304,15 +332,19 @@ async def mikrotik_remove_nat_rule(ctx: Context, rule_id: str, device: Optional[
     """
     await ctx.info(f"Removing NAT rule: rule_id={rule_id}")
 
+    resolved = await _resolve_nat_rule_id(rule_id, ctx, device)
+    if resolved is None:
+        return f"NAT rule with ID '{rule_id}' not found."
+
     # First check if the rule exists
-    check_cmd = f"/ip firewall nat print count-only where .id={rule_id}"
+    check_cmd = f"/ip firewall nat print count-only where .id={resolved}"
     count = await execute_mikrotik_command(check_cmd, ctx, device=device)
 
     if count.strip() == "0":
         return f"NAT rule with ID '{rule_id}' not found."
 
     # Remove the rule
-    cmd = f"/ip firewall nat remove {rule_id}"
+    cmd = f"/ip firewall nat remove {resolved}"
     result = await execute_mikrotik_command(cmd, ctx, device=device)
 
     if "failure:" in result.lower() or "error" in result.lower():
@@ -330,15 +362,19 @@ async def mikrotik_move_nat_rule(ctx: Context, rule_id: str, destination: int, d
     """
     await ctx.info(f"Moving NAT rule: rule_id={rule_id} to position {destination}")
 
+    resolved = await _resolve_nat_rule_id(rule_id, ctx, device)
+    if resolved is None:
+        return f"NAT rule with ID '{rule_id}' not found."
+
     # Check if the rule exists
-    check_cmd = f"/ip firewall nat print count-only where .id={rule_id}"
+    check_cmd = f"/ip firewall nat print count-only where .id={resolved}"
     count = await execute_mikrotik_command(check_cmd, ctx, device=device)
 
     if count.strip() == "0":
         return f"NAT rule with ID '{rule_id}' not found."
 
     # Move the rule
-    cmd = f"/ip firewall nat move {rule_id} destination={destination}"
+    cmd = f"/ip firewall nat move {resolved} destination={destination}"
     result = await execute_mikrotik_command(cmd, ctx, device=device)
 
     if "failure:" in result.lower() or "error" in result.lower():
